@@ -1,0 +1,8 @@
+{
+  "name": "webmanager-connector",
+  "private": true,
+  "scripts": {
+    "build": "node scripts/build-release.mjs",
+    "test": "node scripts/check-release.mjs"
+  }
+}
