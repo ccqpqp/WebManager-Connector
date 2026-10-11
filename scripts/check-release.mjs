@@ -10,4 +10,7 @@ assert.equal(manifest.archiveSha256,createHash('sha256').update(archive).digest(
 assert.ok(archive.length>1000);
 const updater=await readFile('connector/update_client.py','utf8');
 assert.match(updater,/https:\/\/ccqpqp\.github\.io\/WebManager-Connector/);
+const preview=await readFile('connector/local_preview.py','utf8');
+assert.match(preview,/def _failure_summary\(output\)/);
+assert.match(preview,/미리보기 빌드 실패/);
 console.log('Connector release verified:',manifest.version.slice(0,12));

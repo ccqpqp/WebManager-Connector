@@ -55,6 +55,16 @@ def _executable(name):
     if not value:raise RuntimeError(name+" 실행 파일을 찾을 수 없습니다.")
     return value
 
+def _failure_summary(output):
+    lines=[line.strip() for line in str(output or "").splitlines() if line.strip()]
+    for line in reversed(lines):
+        if line.startswith("Error: ["):
+            return line.removeprefix("Error: ")[:240]
+    for line in reversed(lines):
+        if ("Error:" in line or "실패" in line or "failed" in line.lower()) and not line.startswith("at "):
+            return line[:240]
+    return "빌드 검사에서 오류가 발생했습니다. 상세 기록에서 마지막 검사 결과를 확인하세요."
+
 def _run(job,args,cwd,timeout):
     label=" ".join(str(x) for x in args[:3])
     with LOCK:job["log"]=(job.get("log",[])+["[실행] "+label])[-40:]
@@ -69,7 +79,7 @@ def _run(job,args,cwd,timeout):
         raise RuntimeError("미리보기 준비 시간이 초과됐습니다: "+label) from exc
     output="\n".join(line[-500:] for line in result.stdout.splitlines()[-18:])
     with LOCK:job["log"]=(job.get("log",[])+([output] if output else []))[-40:]
-    if result.returncode:raise RuntimeError("미리보기 명령 실패 ("+str(result.returncode)+"): "+output[-800:])
+    if result.returncode:raise RuntimeError("미리보기 빌드 실패 · "+_failure_summary(output))
     return result.stdout.strip()
 
 def _safe_workspace(project):
