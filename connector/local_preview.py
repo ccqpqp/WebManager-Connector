@@ -29,6 +29,7 @@ SHA=re.compile(r"^[0-9a-f]{40}$",re.I)
 TOKEN=re.compile(r"^[A-Za-z0-9_-]{32}$")
 MAX_FILE=30_000_000
 TTL_SECONDS=2*60*60
+WORKSPACE_RETENTION_SECONDS=14*24*60*60
 LOCK=threading.RLock()
 JOBS={}
 SESSIONS={}
@@ -108,6 +109,7 @@ def _build(job):
     published=(root/Path(output)).resolve()
     marker=root/".webmanager-preview-sha"
     if marker.is_file() and marker.read_text(encoding="utf-8",errors="ignore").strip()==sha and published.is_dir() and (published/"index.html").is_file():
+        (root/".webmanager-preview-used").touch()
         _phase(job,"build","같은 커밋의 기존 미리보기 빌드 재사용")
         return published
     _run(job,[git,"reset","--hard",sha],root,60)
@@ -127,15 +129,34 @@ def _build(job):
     if published==root or not published.is_relative_to(root) or not published.is_dir():raise RuntimeError("미리보기 출력 폴더가 올바르지 않습니다: "+output)
     if not (published/"index.html").is_file():raise RuntimeError("미리보기 출력 폴더에 index.html이 없습니다.")
     marker.write_text(sha+"\n",encoding="utf-8")
+    (root/".webmanager-preview-used").touch()
     return published
 
-def _cleanup():
+def _cleanup_workspaces(active_projects):
+    if not WORKSPACES.is_dir():return
+    now=time.time()
+    for root in WORKSPACES.iterdir():
+        if root.name not in local_deploy.SITES or root.name in active_projects or not root.is_dir() or root.is_symlink():continue
+        resolved=root.resolve()
+        if not resolved.is_relative_to(WORKSPACES.resolve()):continue
+        marker=root/".webmanager-preview-used"
+        try:last=(marker if marker.is_file() else root).stat().st_mtime
+        except OSError:continue
+        if now-last>WORKSPACE_RETENTION_SECONDS:
+            try:shutil.rmtree(resolved)
+            except OSError:pass
+
+def _cleanup(disk=False):
     now=time.time()
     for token,row in list(SESSIONS.items()):
         if row["expires"]<=now:SESSIONS.pop(token,None)
     if len(JOBS)>30:
         finished=[key for key,row in JOBS.items() if row.get("phase") in ("ready","failed")]
         for key in finished[:-20]:JOBS.pop(key,None)
+    if disk:
+        active={row.get("project") for row in JOBS.values() if row.get("phase") in ("queued","source","install","build")}
+        active.update(row.get("project") for row in SESSIONS.values())
+        _cleanup_workspaces(active)
 
 def _worker(job,port):
     try:
@@ -161,7 +182,7 @@ def start(project,sha,port):
     deployment=local_deploy.status()
     if deployment.get("activeCount") or deployment.get("queued"):raise ValueError("진행 중인 로컬 배포가 끝난 뒤 미리보기를 실행하세요.")
     with LOCK:
-        _cleanup()
+        _cleanup(disk=True)
         for job in JOBS.values():
             if job["project"]==project and job["sha"]==sha and job["phase"] in ("queued","source","install","build","ready"):
                 if job["phase"]=="ready" and job.get("token") in SESSIONS:SESSIONS[job["token"]]["expires"]=time.time()+TTL_SECONDS
@@ -240,8 +261,9 @@ def _wrapper(row):
     project=html.escape(row["project"]);sha=html.escape(row["sha"][:12]);token=row["token"]
     live=html.escape(row.get("liveUrl","") or "",quote=True)
     live_frame="/preview-live/"+token+"/" if live else ""
-    template="""<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow,noarchive"><title>WebManager 미리보기</title><link rel="stylesheet" href="/preview-shell.css"></head><body data-live-frame="__LIVE_FRAME__"><div class="bar"><strong>__PROJECT__ 미리보기 <small>__SHA__</small></strong><button id="desktop" class="on">PC</button><button id="mobile">모바일</button><button id="compare">운영 화면 나란히</button><button id="diff" disabled>변경 표시</button></div><div id="diffState" class="note">운영 배포와 분리된 미리보기입니다. 방문·행동 통계와 데이터 변경 요청을 차단합니다.</div><div id="stage" class="stage"><div id="previewPane" class="pane preview"><iframe id="previewFrame" src="/preview-site/__TOKEN__/" title="수정본 미리보기"></iframe></div><div id="livePane" class="pane live"><iframe id="liveFrame" sandbox="allow-same-origin" title="현재 운영 화면"></iframe></div></div><script src="/preview-shell.js"></script></body></html>"""
-    return template.replace("__PROJECT__",project).replace("__SHA__",sha).replace("__TOKEN__",token).replace("__LIVE_FRAME__",live_frame).encode("utf-8")
+    snapshot_frame="/preview-snapshot/"+token+"/"
+    template="""<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow,noarchive"><title>WebManager 미리보기</title><link rel="stylesheet" href="/preview-shell.css"></head><body data-live-frame="__LIVE_FRAME__" data-snapshot-frame="__SNAPSHOT_FRAME__"><div class="bar"><strong>__PROJECT__ 미리보기 <small>__SHA__</small></strong><button id="desktop" class="on">PC</button><button id="mobile">모바일</button><button id="compare">운영 화면 나란히</button><button id="diff" disabled>변경 표시</button><button id="prevChange" hidden>이전 변경</button><button id="nextChange" hidden>다음 변경</button></div><div id="diffState" class="note">운영 배포와 분리된 미리보기입니다. 방문·행동 통계와 데이터 변경 요청을 차단합니다.</div><div id="stage" class="stage"><div id="previewPane" class="pane preview"><iframe id="previewFrame" src="/preview-site/__TOKEN__/" title="수정본 미리보기"></iframe></div><div id="livePane" class="pane live"><iframe id="liveFrame" sandbox="allow-same-origin" title="현재 운영 화면"></iframe></div></div><iframe id="snapshotFrame" class="snapshot-frame" sandbox="allow-same-origin" title="변경 비교용 수정 화면"></iframe><script src="/preview-shell.js"></script></body></html>"""
+    return template.replace("__PROJECT__",project).replace("__SHA__",sha).replace("__TOKEN__",token).replace("__LIVE_FRAME__",live_frame).replace("__SNAPSHOT_FRAME__",snapshot_frame).encode("utf-8")
 
 class _SameOriginRedirect(HTTPRedirectHandler):
     def __init__(self,origin):super().__init__();self.origin=origin
@@ -273,6 +295,20 @@ def _live_snapshot(row,path=""):
     else:text=addition+text
     return text.encode("utf-8")
 
+def _preview_snapshot(row,path,token):
+    file=_preview_file(row["root"],path)
+    if file.suffix.lower() not in (".html",".htm"):raise ValueError("미리보기 HTML을 비교할 수 없습니다")
+    text=file.read_text(encoding="utf-8",errors="replace")
+    text=re.sub(r"<script\b[^>]*>[\s\S]*?</script\s*>","",text,flags=re.I)
+    text=re.sub(r"<meta\b[^>]*http-equiv=[\"']?refresh[\"']?[^>]*>","",text,flags=re.I)
+    parent=file.relative_to(Path(row["root"]).resolve()).parent
+    relative="" if parent==Path(".") else parent.as_posix()
+    base="/preview-site/"+token+"/"+(relative.rstrip("/")+"/" if relative else "")
+    addition='<base href="'+html.escape(base,quote=True)+'"><meta name="robots" content="noindex,nofollow,noarchive">'
+    if re.search(r"<head(?:\s[^>]*)?>",text,re.I):text=re.sub(r"<head(\s[^>]*)?>",lambda match:match.group(0)+addition,text,count=1,flags=re.I)
+    else:text=addition+text
+    return text.encode("utf-8")
+
 def handle(handler):
     path=urlsplit(handler.path).path
     if path=="/preview-shell.js":
@@ -294,6 +330,13 @@ def handle(handler):
         try:data=_live_snapshot(row,"/".join(parts[3:]))
         except ValueError as exc:return _send(handler,502,str(exc).encode("utf-8")) or True
         csp="default-src 'none'; style-src 'unsafe-inline' https:; img-src https: data:; font-src https: data:; script-src 'none'; connect-src 'none'; form-action 'none'; frame-ancestors 'self'; base-uri https:"
+        return _send(handler,200,data,"text/html; charset=utf-8",csp=csp) or True
+    if path.startswith("/preview-snapshot/"):
+        parts=path.split("/");token=parts[2] if len(parts)>2 else "";row=_session(token)
+        if not row:return _send(handler,404,b"Preview expired") or True
+        try:data=_preview_snapshot(row,"/".join(parts[3:]),token)
+        except (ValueError,OSError):return _send(handler,404,b"Preview snapshot not found") or True
+        csp="default-src 'none'; style-src 'unsafe-inline' https: 'self'; img-src https: data: 'self'; font-src https: data:; script-src 'none'; connect-src 'none'; form-action 'none'; frame-ancestors 'self'; base-uri 'self'"
         return _send(handler,200,data,"text/html; charset=utf-8",csp=csp) or True
     if path.startswith("/preview-site/"):
         parts=path.split("/");token=parts[2] if len(parts)>2 else "";row=_session(token)
