@@ -22,6 +22,221 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit, parse_qs, unquote
 
+def create_remote_link():
+    import base64
+    import json
+    import os
+    import re
+    import secrets
+    import socket
+    import threading
+    import time
+    import uuid
+    from pathlib import Path
+    from urllib.parse import urlsplit, unquote
+    from urllib.request import Request, build_opener, HTTPRedirectHandler, ProxyHandler
+    from urllib.error import HTTPError
+
+    BASE=Path(os.environ.get('LOCALAPPDATA',str(Path.home()))) / 'WebManagerConnector'
+    CONFIG=BASE/'remote-link.json'
+    ID=re.compile(r'^[a-f0-9]{32}$')
+    TOKEN=re.compile(r'^[A-Za-z0-9_-]{43}$')
+    PREVIEW=re.compile(r'^[A-Za-z0-9_-]{32}$')
+    MAX_BYTES=8_500_000
+    LOCK=threading.RLock()
+    STOP=threading.Event()
+    STATE={}
+    LAST_CONTACT=0.0
+    LAST_ERROR=''
+    PORT=18765
+    LOCAL_TOKEN=''
+    THREAD=None
+    ACTIVE=set()
+    SEEN={}
+    READ={
+        '/v1/status','/v1/system/status','/v1/deploy/status','/v1/deploy/plan',
+        '/v1/deploy/log','/v1/preview/status','/v1/folders','/v1/images','/v1/file',
+        '/v1/workspace/status','/v1/workspace/list','/v1/workspace/file','/v1/trash',
+        '/v1/update/check','/v1/update/status','/v1/connector/installation',
+        '/v1/notifications','/v1/notifications/display',
+    }
+    WRITE={
+        '/v1/preview/start','/v1/deploy/start','/v1/deploy/concurrency',
+        '/v1/notifications','/v1/notifications/test','/v1/workspace/save',
+        '/v1/workspace/configure','/v1/folders/add','/v1/folders/remove',
+        '/v1/trash','/v1/restore','/v1/update/apply','/v1/connector/restart',
+        '/v1/connector/open-folder','/v1/connector/desktop-shortcut',
+    }
+    class NoRedirect(HTTPRedirectHandler):
+        def redirect_request(self,req,fp,code,msg,headers,newurl):
+            return None
+
+    def valid_origin(value):
+        if not isinstance(value,str):return False
+        return bool(re.fullmatch(r'https://webmanager-pc-link\.[a-z0-9][a-z0-9-]*\.workers\.dev',value))
+
+    def _write():
+        BASE.mkdir(parents=True,exist_ok=True)
+        temp=CONFIG.with_suffix('.tmp')
+        with temp.open('w',encoding='utf-8') as handle:
+            json.dump(STATE,handle,ensure_ascii=False,indent=2)
+        try:os.chmod(temp,0o600)
+        except OSError:pass
+        os.replace(temp,CONFIG)
+
+    def identity():
+        with LOCK:
+            if not STATE:
+                try:
+                    value=json.loads(CONFIG.read_text(encoding='utf-8'))
+                    if not isinstance(value,dict) or not ID.fullmatch(value.get('id','')) or not TOKEN.fullmatch(value.get('token','')):
+                        raise ValueError('PC 연결 정보 형식 오류')
+                    if value.get('url') and not valid_origin(value['url']):raise ValueError('PC 연결 주소 오류')
+                    STATE.update(value)
+                except FileNotFoundError:
+                    STATE.update(id=uuid.uuid4().hex,token=secrets.token_urlsafe(32),name=socket.gethostname()[:80],url='')
+                    _write()
+            return dict(STATE)
+
+    def configure(data):
+        nonlocal LAST_ERROR
+        if not isinstance(data,dict) or set(data)!={'url','id'} or not valid_origin(data.get('url')):
+            raise ValueError('공식 PC 연결 서버 주소만 사용할 수 있습니다')
+        with LOCK:
+            current=identity()
+            if data['id']!=current['id']:raise ValueError('PC 등록 번호가 다릅니다')
+            STATE['url']=data['url'];STATE['disabled']=False;STATE['disabledReason']='';_write();LAST_ERROR=''
+        return status()
+
+    def disable():
+        with LOCK:
+            identity();STATE['disabled']=True;STATE['disabledReason']='user';_write()
+        return status()
+
+    def status():
+        with LOCK:
+            current=identity()
+            enabled=bool(current.get('url')) and not current.get('disabled',False)
+            return {'id':current['id'],'name':current['name'],'registered':enabled,
+                    'connected':enabled and time.time()-LAST_CONTACT<45,
+                    'disabledByUser':current.get('disabledReason')=='user',
+                    'lastContact':int(LAST_CONTACT*1000) if LAST_CONTACT else None,
+                    'error':LAST_ERROR,'version':1}
+
+    def _request(url,method='POST',data=None,headers=None,timeout=25,local=False):
+        payload=None if data is None else json.dumps(data,ensure_ascii=False,separators=(',',':')).encode('utf-8')
+        request=Request(url,data=payload,method=method,headers={'Content-Type':'application/json',**(headers or {})})
+        opener=build_opener(ProxyHandler({}),NoRedirect()) if local else build_opener(NoRedirect())
+        try:response=opener.open(request,timeout=timeout)
+        except HTTPError as error:response=error
+        with response:
+            size=int(response.headers.get('Content-Length','0'))
+            if size>MAX_BYTES:raise ValueError('휴대폰 미리보기 파일은 8.5MB까지 지원합니다')
+            raw=response.read(MAX_BYTES+1)
+            if len(raw)>MAX_BYTES:raise ValueError('PC 응답 크기 제한을 초과했습니다')
+            return response.status,response.headers,raw
+
+    def validate_task(task):
+        if not isinstance(task,dict) or not ID.fullmatch(str(task.get('id',''))):raise ValueError('PC 요청 번호 오류')
+        expiry=task.get('expiresAt')
+        if not isinstance(expiry,(int,float)) or not 0<expiry-time.time()*1000<=60000:raise ValueError('만료된 PC 요청')
+        path=task.get('path');method=task.get('method')
+        if not isinstance(path,str) or len(path)>4096 or not path.startswith('/') or path.startswith('//') or any(c in path for c in '\\\r\n#'):
+            raise ValueError('PC 요청 경로 오류')
+        parsed=urlsplit(path)
+        if parsed.scheme or parsed.netloc:raise ValueError('외부 주소 요청 차단')
+        if task.get('kind')=='api':
+            if not (method=='GET' and parsed.path in READ or method=='POST' and parsed.path in WRITE):
+                raise ValueError('허용되지 않은 PC 작업')
+            if method=='GET' and task.get('body') is not None:raise ValueError('조회 요청에 본문을 사용할 수 없습니다')
+            if method=='POST' and not isinstance(task.get('body'),dict):raise ValueError('PC 요청 본문 오류')
+            if len(json.dumps(task.get('body')).encode('utf-8'))>8_500_000:raise ValueError('PC 요청 크기 초과')
+        elif task.get('kind')=='preview':
+            if method!='GET' or not PREVIEW.fullmatch(str(task.get('previewToken',''))):raise ValueError('미리보기 요청 오류')
+            decoded=parsed.path
+            for _ in range(3):decoded=unquote(decoded)
+            if ':' in decoded or any(ord(c)<32 for c in decoded) or '\\' in decoded or any(p in ('.','..') for p in decoded.split('/')) or re.match(r'^/(?:v1|_wm)(?:/|$)',decoded,re.I):
+                raise ValueError('미리보기 외부 경로 차단')
+            explicit=re.match(r'^/preview(?:-site|-live)?/([A-Za-z0-9_-]{32})(?:/|$)',decoded)
+            if explicit and explicit[1]!=task['previewToken']:raise ValueError('다른 미리보기 접근 차단')
+        else:raise ValueError('허용되지 않은 PC 요청')
+        return path
+
+    def execute(task):
+        path=validate_task(task)
+        if task['kind']=='preview':
+            status_code,headers,data=_request('http://127.0.0.1:'+str(PORT)+path,method='GET',
+                headers={'Cookie':'wm_preview='+task['previewToken']},local=True)
+            return {'id':task['id'],'status':status_code,'contentType':headers.get('Content-Type','application/octet-stream'),
+                    'base64':base64.b64encode(data).decode('ascii')}
+        status_code,headers,data=_request('http://127.0.0.1:'+str(PORT)+path,method=task['method'],data=task.get('body'),
+            headers={'X-WebManager-Connector-Token':LOCAL_TOKEN},local=True)
+        try:result=json.loads(data.decode('utf-8'))
+        except (UnicodeDecodeError,ValueError):return {'id':task['id'],'status':502,'json':{'error':'PC 응답 형식 오류'}}
+        return {'id':task['id'],'status':status_code,'json':result}
+
+    def _work(task,current):
+        try:
+            try:result=execute(task)
+            except Exception as exc:result={'id':task.get('id',''),'status':502,'json':{'error':str(exc)[:220]}}
+            # Results can be retried; the local operation itself is never retried.
+            for attempt in range(2):
+                try:
+                    code,_,_=_request(current['url']+'/_wm/result?device='+current['id'],data=result,
+                        headers={'Authorization':'Bearer '+current['token']},timeout=10)
+                    if code<500:break
+                except (OSError,ValueError):pass
+                if STOP.wait(1):break
+        finally:
+            with LOCK:ACTIVE.discard(task.get('id'))
+
+    def _run():
+        nonlocal LAST_CONTACT,LAST_ERROR
+        failures=0
+        while not STOP.is_set():
+            try:
+                current=identity()
+                if not current.get('url') or current.get('disabled'):
+                    STOP.wait(2);continue
+                with LOCK:capacity=max(0,4-len(ACTIVE))
+                if not capacity:STOP.wait(.2);continue
+                code,_,raw=_request(current['url']+'/_wm/poll?device='+current['id'],data={'capacity':capacity},
+                    headers={'Authorization':'Bearer '+current['token']},timeout=28)
+                if code==401:
+                    with LOCK:LAST_ERROR='PC에서 WebManager에 다시 접속해 연결하세요';STATE['disabled']=True;STATE['disabledReason']='auth';_write()
+                    continue
+                if code!=200:raise ValueError('PC 연결 서버 응답 오류 '+str(code))
+                data=json.loads(raw.decode('utf-8'))
+                if not isinstance(data.get('tasks'),list):raise ValueError('PC 연결 응답 형식 오류')
+                LAST_CONTACT=time.time();LAST_ERROR='';failures=0
+                for task in data['tasks'][:capacity]:
+                    with LOCK:
+                        for key,expiry in list(SEEN.items()):
+                            if expiry<time.time():SEEN.pop(key,None)
+                        identity_value=task.get('id','')
+                        if identity_value in SEEN:continue
+                        SEEN[identity_value]=time.time()+90;ACTIVE.add(identity_value)
+                    threading.Thread(target=_work,args=(task,current),daemon=True,name='WebManagerRemoteTask').start()
+            except (OSError,ValueError,KeyError,TypeError) as exc:
+                LAST_ERROR=str(exc)[:180];failures+=1;STOP.wait(min(30,2**min(failures,5)))
+
+    def start(port,token):
+        nonlocal PORT,LOCAL_TOKEN,THREAD
+        if not isinstance(port,int) or not 1024<=port<=65535:raise ValueError('PC 포트 오류')
+        with LOCK:
+            PORT=port;LOCAL_TOKEN=token
+            if THREAD and THREAD.is_alive():return
+            STOP.clear();THREAD=threading.Thread(target=_run,daemon=True,name='WebManagerRemoteLink');THREAD.start()
+
+    def stop():
+        STOP.set()
+
+    from types import SimpleNamespace
+    return SimpleNamespace(identity=identity, configure=configure, disable=disable, status=status,
+                           start=start, stop=stop, validate_task=validate_task, execute=execute)
+
+remote_link=create_remote_link()
+
 BASE=Path(os.environ.get("LOCALAPPDATA",str(Path.home()))) / "WebManagerConnector"
 SETTINGS=BASE / "settings.json"
 TRASH=BASE / "trash"
@@ -324,6 +539,18 @@ class Handler(BaseHTTPRequestHandler):
         u=urlsplit(self.path)
         q=parse_qs(u.query)
         try:
+            if method=="GET" and u.path=="/v1/remote/identity":
+                return self.send(200,remote_link.identity())
+            if method=="GET" and u.path=="/v1/remote/status":
+                return self.send(200,remote_link.status())
+            if method=="POST" and u.path in ("/v1/remote/configure","/v1/remote/disable"):
+                length=int(self.headers.get("Content-Length","0"))
+                if not 0<length<=1024:return self.send(413,{"error":"요청 크기 초과"})
+                body=json.loads(self.rfile.read(length).decode("utf-8"))
+                if u.path.endswith("/disable"):
+                    if body!={}:raise ValueError("연결 해제 입력 오류")
+                    return self.send(200,remote_link.disable())
+                return self.send(200,remote_link.configure(body))
             if method=="GET" and u.path=="/v1/deploy/plan":
                 return self.send(200,local_deploy.plan(q.get("project",[""])[0]))
             if method=="GET" and u.path=="/v1/preview/status":
@@ -550,6 +777,7 @@ def main():
     reconcile_tray_version()
     # GitHub change monitoring runs on this PC, not in WebManager's browser.
     auto_local.start()
+    remote_link.start(a.port,state["token"])
     # Updates are deliberately user initiated. Starting the connector must never
     # download, install, or restart it behind the user's back. The web screen can
     # perform a lightweight version check and exposes one explicit update button.
@@ -564,6 +792,7 @@ def main():
     try:server.serve_forever()
     except KeyboardInterrupt:pass
     finally:
+        remote_link.stop()
         auto_local.stop()
         local_deploy.shutdown()
         server.server_close()

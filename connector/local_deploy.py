@@ -30,7 +30,7 @@ PROJECT = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 # Values mirror the committed GitHub build contracts, not browser input.
 SITES = {
     "webmanager": ("WebManager", "preflight", "dist"),
-    "laminel": ("laminel", "build", "dist"),
+    "laminel": ("gamestn", "build", "dist"),
     "zeus-helper": ("zeus-helper", "build", "public"),
     "site-ops": ("site-ops", "build", "public"),
     "aniimo-guide-gstn": ("aniimo-guide", "build", ".build/public"),
@@ -365,8 +365,12 @@ def _prepare(job, repo):
         if root.is_symlink() or not (root/".git").is_dir():
             raise RuntimeError("관리 작업 폴더에 예상하지 못한 파일이 있습니다. 폴더를 확인하세요: "+str(root))
         url=_invoke(job,[git,"remote","get-url","origin"],root,25).strip()
-        if url.rstrip("/").removesuffix(".git").lower()!=expected.removesuffix(".git").lower():
-            raise RuntimeError("기존 작업 폴더의 GitHub 저장소가 다릅니다: "+str(root))
+        actual=url.rstrip("/").removesuffix(".git").lower()
+        if actual!=expected.removesuffix(".git").lower():
+            if project=="laminel" and actual=="https://github.com/ccqpqp/laminel":
+                _invoke(job,[git,"remote","set-url","origin",expected],root,25,env)
+            else:
+                raise RuntimeError("기존 작업 폴더의 GitHub 저장소가 다릅니다: "+str(root))
     else:
         _invoke(job,[git,"clone","--depth","1","--branch","main",expected,str(root)],WORKSPACES,600,env)
     _invoke(job,[git,"fetch","--depth","1","origin","main"],root,300,env)

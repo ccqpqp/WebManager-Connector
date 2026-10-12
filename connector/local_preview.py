@@ -99,8 +99,12 @@ def _build(job):
     if root.exists():
         if root.is_symlink() or not (root/".git").is_dir():raise RuntimeError("미리보기 전용 작업 폴더를 확인하세요")
         origin=_run(job,[git,"remote","get-url","origin"],root,20)
-        if origin.rstrip("/").removesuffix(".git").lower()!=expected.removesuffix(".git").lower():
-            raise RuntimeError("미리보기 저장소 연결이 다릅니다")
+        actual=origin.rstrip("/").removesuffix(".git").lower()
+        if actual!=expected.removesuffix(".git").lower():
+            if project=="laminel" and actual=="https://github.com/ccqpqp/laminel":
+                _run(job,[git,"remote","set-url","origin",expected],root,20)
+            else:
+                raise RuntimeError("미리보기 저장소 연결이 다릅니다")
     else:
         _run(job,[git,"clone","--depth","1","--branch","main",expected,str(root)],WORKSPACES,600)
     _run(job,[git,"fetch","--depth","1","origin","main"],root,300)
