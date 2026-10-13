@@ -105,6 +105,8 @@ def configure_source(project,repo,branch,script,output):
     if not isinstance(project,str) or project not in SITES or not PROJECT.fullmatch(project):
         raise ValueError("지원하는 Pages 사이트를 선택하세요.")
     value=_validate_source(repo,branch,script,output)
+    if project=="webmanager" and (value["script"]!="preflight" or value["output"]!="dist"):
+        raise ValueError("WebManager 자체 배포는 npm run preflight와 dist 출력 검증이 필수입니다.")
     _head_for(value["repo"],value["branch"])
     with LOCK:
         if any(j["project"]==project and j["phase"] not in ("success","failed") for j in JOBS.values()):
