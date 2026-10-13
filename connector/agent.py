@@ -122,6 +122,18 @@ def create_remote_link():
         with LOCK:
             current=identity()
             enabled=bool(current.get('url')) and not current.get('disabled',False)
+            thread_alive=bool(THREAD and THREAD.is_alive())
+            if enabled and not thread_alive and LOCAL_TOKEN and not STOP.is_set():
+                # The local HTTP server may outlive an unexpectedly terminated
+                # outbound relay thread. Safely recover only our own thread.
+                start(PORT,LOCAL_TOKEN)
+                thread_alive=bool(THREAD and THREAD.is_alive())
+            phase=('disabled' if current.get('disabled',False) else
+                   'not-configured' if not current.get('url') else
+                   'stopped' if not thread_alive else
+                   'connected' if LAST_CONTACT and time.time()-LAST_CONTACT<45 else
+                   'failed' if LAST_ERROR else
+                   'connecting' if LAST_ATTEMPT else 'waiting')
             return {'id':current['id'],'name':current['name'],'registered':enabled,
                     'connected':enabled and time.time()-LAST_CONTACT<45,
                     'disabledByUser':current.get('disabledReason')=='user',
@@ -129,7 +141,35 @@ def create_remote_link():
                     'lastContact':int(LAST_CONTACT*1000) if LAST_CONTACT else None,
                     'lastAttempt':int(LAST_ATTEMPT*1000) if LAST_ATTEMPT else None,
                     'lastHttpStatus':LAST_HTTP_STATUS or None,
-                    'error':LAST_ERROR,'version':2}
+                    'threadAlive':thread_alive,'phase':phase,
+                    'error':LAST_ERROR,'version':3}
+
+    def probe():
+        # Local administrator-only, read-only network check. Do not mark the PC
+        # online: only the authenticated task poll proves it can accept jobs.
+        current=identity()
+        if current.get('disabled'):
+            return {'ok':False,'phase':'disabled','message':'원격 연결이 해제돼 있습니다. PC에서 연결 복구를 실행하세요.','local':status()}
+        url=current.get('url','')
+        if not valid_origin(url):
+            return {'ok':False,'phase':'not-configured','message':'PC 원격 연결 서버 주소가 아직 등록되지 않았습니다.','local':status()}
+        started=time.monotonic()
+        try:
+            code,headers,raw=_request(url+'/_wm/version',method='GET',timeout=12)
+            try:data=json.loads(raw.decode('utf-8'))
+            except (UnicodeDecodeError,ValueError):data={}
+            good=code==200 and data.get('service')=='webmanager-pc-link'
+            return {'ok':good,'phase':'worker-reachable' if good else 'worker-http',
+                    'httpStatus':code,'latencyMs':round((time.monotonic()-started)*1000),
+                    'relayVersion':str(data.get('version',''))[:40],
+                    'message':'PC에서 원격 Worker HTTPS 접속 성공 · 실제 작업 연결은 별도 확인 필요' if good
+                    else 'PC에서 원격 Worker가 정상 응답하지 않았습니다. HTTP '+str(code),
+                    'local':status()}
+        except (OSError,ValueError,KeyError,TypeError) as exc:
+            return {'ok':False,'phase':'network-failed',
+                    'latencyMs':round((time.monotonic()-started)*1000),
+                    'message':'PC에서 원격 Worker로 HTTPS 연결 실패 · '+type(exc).__name__+': '+str(exc)[:160],
+                    'local':status()}
 
     def _request(url,method='POST',data=None,headers=None,timeout=25,local=False):
         payload=None if data is None else json.dumps(data,ensure_ascii=False,separators=(',',':')).encode('utf-8')
@@ -228,7 +268,8 @@ def create_remote_link():
                         SEEN[identity_value]=time.time()+90;ACTIVE.add(identity_value)
                     threading.Thread(target=_work,args=(task,current),daemon=True,name='WebManagerRemoteTask').start()
             except (OSError,ValueError,KeyError,TypeError) as exc:
-                LAST_ERROR=str(exc)[:180];failures+=1;STOP.wait(min(30,2**min(failures,5)))
+                LAST_ERROR=(type(exc).__name__+': '+str(exc))[:180]
+                failures+=1;STOP.wait(min(30,2**min(failures,5)))
 
     def start(port,token):
         nonlocal PORT,LOCAL_TOKEN,THREAD
@@ -243,7 +284,7 @@ def create_remote_link():
 
     from types import SimpleNamespace
     return SimpleNamespace(identity=identity, configure=configure, disable=disable, status=status,
-                           start=start, stop=stop, validate_task=validate_task, execute=execute)
+                           probe=probe,start=start, stop=stop, validate_task=validate_task, execute=execute)
 
 remote_link=create_remote_link()
 
@@ -553,6 +594,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(200,remote_link.identity())
             if method=="GET" and u.path=="/v1/remote/status":
                 return self.send(200,remote_link.status())
+            if method=="POST" and u.path=="/v1/remote/probe":
+                length=int(self.headers.get("Content-Length","0"))
+                if not 1<=length<=128:return self.send(413,{"error":"원격 진단 요청 크기 오류"})
+                body=json.loads(self.rfile.read(length).decode("utf-8"))
+                if body!={}:raise ValueError("원격 진단에는 추가 입력이 필요하지 않습니다.")
+                return self.send(200,remote_link.probe())
             if method=="POST" and u.path in ("/v1/remote/configure","/v1/remote/disable"):
                 length=int(self.headers.get("Content-Length","0"))
                 if not 0<length<=1024:return self.send(413,{"error":"요청 크기 초과"})
