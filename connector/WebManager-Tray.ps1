@@ -1,6 +1,7 @@
 ﻿param([switch]$Background)
 # Portable, single-instance Windows tray supervisor. No admin or external libraries.
 $ErrorActionPreference = 'Stop'
+$script:root = $PSScriptRoot
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
@@ -66,7 +67,6 @@ if (-not $created) {
     }
     exit 0
 }
-$script:root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $script:agentFile = Join-Path $script:root 'agent.py'
 $script:origin = 'https://webmanager-2nv.pages.dev'
 $script:dataDir = Join-Path $env:LOCALAPPDATA 'WebManagerConnector'

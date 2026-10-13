@@ -38,5 +38,6 @@ const workflow=await readFile('.github/workflows/publish.yml','utf8');
 assert.match(workflow,/push:\s*\n\s*branches:\s*\n\s*- main/,'Connector releases must publish automatically from main');
 assert.match(workflow,/workflow_dispatch:/,'Manual recovery publishing must remain available');
 const tray=await readFile('connector/WebManager-Tray.ps1','utf8');
+assert.match(tray,/\$script:root = \$PSScriptRoot[\s\S]*Add-Type -AssemblyName System\.Windows\.Forms/,'Tray must capture its installed directory before helper calls can change invocation context');
 assert.match(tray,/Get-FileHash -LiteralPath \(Join-Path \$script:root 'WebManager-Tray\.ps1'\)/,'Tray must report the hash of its actual installed script');
 console.log('Connector release verified:',manifest.version.slice(0,12));
