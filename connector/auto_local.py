@@ -156,16 +156,19 @@ def _scan():
         if project in active_jobs or slots <= 0:
             continue
         try:
-            sha = local_deploy.plan(project)["sha"].lower()
+            plan = local_deploy.plan(project)
+            sha = plan["sha"].lower()
+            source = {"repo":plan["repo"],"branch":plan["branch"]}
         except (ValueError, RuntimeError, OSError) as exc:
             _set_state(lastError=project + " · GitHub 최신 코드 조회 실패: " +
                        str(exc)[:110])
             continue
         previous = existing.get(project)
-        if not isinstance(previous, dict):
-            # First observation is baseline only. No surprise deploy on enabling.
-            _record(project, {"sha": sha, "status": "baseline",
-                              "updatedAt": _now()})
+        if not isinstance(previous,dict) or any(previous.get(key)!=value for key,value in source.items()):
+            # A changed GitHub source must establish a new baseline, not treat
+            # the new repository as an update to the old one and auto-deploy.
+            _record(project, {"sha":sha, **source, "status":"baseline",
+                              "updatedAt":_now()})
             continue
         if previous.get("sha") == sha:
             if previous.get("candidateSha"):
@@ -186,7 +189,7 @@ def _scan():
             continue
         # Persist before queueing. Even if agent exits here, same SHA is not
         # retried automatically. Manual deploy is always available.
-        entry = {"sha": sha, "status": "attempted", "updatedAt": _now()}
+        entry = {"sha": sha, **source, "status": "attempted", "updatedAt": _now()}
         _record(project, entry)
         existing[project] = entry
         try:
