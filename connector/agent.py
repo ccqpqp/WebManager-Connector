@@ -158,6 +158,7 @@ def create_remote_link():
             code,headers,raw=_request(url+'/_wm/version',method='GET',timeout=12)
             try:data=json.loads(raw.decode('utf-8'))
             except (UnicodeDecodeError,ValueError):data={}
+            if not isinstance(data,dict):data={}
             good=code==200 and data.get('service')=='webmanager-pc-link'
             return {'ok':good,'phase':'worker-reachable' if good else 'worker-http',
                     'httpStatus':code,'latencyMs':round((time.monotonic()-started)*1000),
