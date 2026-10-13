@@ -1,8 +1,8 @@
 name: Publish connector
 
+# Publishing this connector installs a new PC version. Git pushes are source-only;
+# releases must be explicitly started after validating the connector.
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
