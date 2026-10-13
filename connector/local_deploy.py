@@ -30,7 +30,7 @@ PROJECT = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 # Values mirror the committed GitHub build contracts, not browser input.
 SITES = {
     "webmanager": ("WebManager", "preflight", "dist"),
-    "laminel": ("gamestn", "build", "dist"),
+    "laminel": ("laminel", "build", "dist"),
     "zeus-helper": ("zeus-helper", "build", "public"),
     "site-ops": ("site-ops", "build", "public"),
     "aniimo-guide-gstn": ("aniimo-guide", "build", ".build/public"),
@@ -41,6 +41,83 @@ SITES = {
     "freelancer-tax-check": ("freelancer-tax-check", "", "public"),
 }
 MAX_QUEUE = 6
+
+SOURCE_FILE = DATA / "deploy-sources.json"
+SOURCE_LOCK = threading.RLock()
+REPO_NAME = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+REF_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,95}$")
+BUILD_NAME = re.compile(r"^[A-Za-z0-9:_-]{0,70}$")
+
+def _validate_source(repo,branch,script,output):
+    repo,branch,script,output=(str(x or "").strip() for x in (repo,branch,script,output))
+    if not REPO_NAME.fullmatch(repo) or not REF_NAME.fullmatch(branch) or ".." in branch:
+        raise ValueError("GitHub 저장소 또는 브랜치 형식이 올바르지 않습니다.")
+    if not BUILD_NAME.fullmatch(script):
+        raise ValueError("npm 빌드 스크립트 이름이 올바르지 않습니다.")
+    if not output or len(output)>140 or output.startswith("/") or "\\" in output or any(
+        p in ("",".","..") or (p.startswith(".") and p!=".build") for p in output.split("/")
+    ):
+        raise ValueError("배포 출력 폴더는 dist, public 등 안전한 공개 하위 폴더만 가능합니다.")
+    return {"repo":repo,"branch":branch,"script":script,"output":output}
+
+def _source_overrides():
+    try:
+        raw=json.loads(SOURCE_FILE.read_text(encoding="utf-8"))
+        values=raw.get("sources",{}) if isinstance(raw,dict) else {}
+        if not isinstance(values,dict):return {}
+        valid={}
+        for project,item in list(values.items())[:50]:
+            if project not in SITES or not isinstance(item,dict):continue
+            try:valid[project]=_validate_source(item.get("repo"),item.get("branch"),item.get("script"),item.get("output"))
+            except ValueError:pass
+        return valid
+    except (OSError,ValueError,TypeError):return {}
+
+def site_source(project):
+    if not isinstance(project,str) or project not in SITES or not PROJECT.fullmatch(project):
+        raise ValueError("지원하지 않는 Pages 배포 대상입니다.")
+    old,script,output=SITES[project]
+    with SOURCE_LOCK:override=_source_overrides().get(project)
+    return dict(override or _validate_source("ccqpqp/"+old,"main",script,output))
+
+def source_summary():
+    configured=_source_overrides()
+    return {project:{**site_source(project),"custom":project in configured} for project in SITES}
+
+def _head_for(repository,branch):
+    git=_executable("git")
+    url="https://github.com/"+repository+".git"
+    env=os.environ.copy()
+    env.update({"GIT_TERMINAL_PROMPT":"0","GCM_INTERACTIVE":"Never"})
+    flags=getattr(subprocess,"CREATE_NO_WINDOW",0)
+    try:
+        result=subprocess.run([git,"ls-remote","--exit-code",url,"refs/heads/"+branch],
+            stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,encoding="utf-8",errors="replace",
+            stdin=subprocess.DEVNULL,shell=False,timeout=35,creationflags=flags,env=env)
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError("GitHub 최신 커밋 확인 시간이 초과됐습니다.") from exc
+    sha=(result.stdout.split() or [""])[0].lower()
+    if result.returncode or not SHA.fullmatch(sha):
+        raise ValueError("선택한 GitHub 저장소 또는 브랜치의 최신 커밋을 확인할 수 없습니다.")
+    return sha
+
+def configure_source(project,repo,branch,script,output):
+    if not isinstance(project,str) or project not in SITES or not PROJECT.fullmatch(project):
+        raise ValueError("지원하는 Pages 사이트를 선택하세요.")
+    value=_validate_source(repo,branch,script,output)
+    _head_for(value["repo"],value["branch"])
+    with LOCK:
+        if any(j["project"]==project and j["phase"] not in ("success","failed") for j in JOBS.values()):
+            raise ValueError("진행 중인 배포가 끝나면 저장소를 변경할 수 있습니다.")
+        with SOURCE_LOCK:
+            sources=_source_overrides()
+            sources[project]=value
+            DATA.mkdir(parents=True,exist_ok=True)
+            temporary=SOURCE_FILE.with_suffix(".tmp")
+            temporary.write_text(json.dumps({"version":1,"sources":sources},ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
+            os.replace(temporary,SOURCE_FILE)
+    return {"saved":True,"project":project,"source":{**value,"custom":True}}
+
 PREFERENCES = DATA / "deploy-preferences.json"
 
 def _load_concurrency():
@@ -68,8 +145,10 @@ UPDATING = False
 def _ts():
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
-def _safe_file(project):
-    return WORKSPACES / project
+def _safe_file(project,repo,branch):
+    # A changed repo gets its own private checkout; never mutate an old clone.
+    identity=hashlib.sha256((repo+"@"+branch).encode("utf-8")).hexdigest()[:12]
+    return WORKSPACES / (project+"-"+identity)
 
 def _clean_line(line):
     # Remove common token formats before logs can reach the browser.
@@ -352,38 +431,32 @@ def _stop_process(process):
     except (OSError,subprocess.TimeoutExpired):
         pass
 
-def _prepare(job, repo):
+def _prepare(job, repository, branch):
     project=job["project"]
-    root=_safe_file(project)
+    root=_safe_file(project,repository,branch)
     git=_executable("git")
     env=os.environ.copy()
     env.update({"GIT_TERMINAL_PROMPT":"0","GCM_INTERACTIVE":"Never","CI":"1","CLOUDFLARE_SEND_METRICS":"false"})
     WORKSPACES.mkdir(parents=True,exist_ok=True)
     _phase(job,"source","GitHub 최신 코드 확인")
-    expected=f"https://github.com/ccqpqp/{repo}.git"
+    expected="https://github.com/"+repository+".git"
     if root.exists():
         if root.is_symlink() or not (root/".git").is_dir():
-            raise RuntimeError("관리 작업 폴더에 예상하지 못한 파일이 있습니다. 폴더를 확인하세요: "+str(root))
-        url=_invoke(job,[git,"remote","get-url","origin"],root,25).strip()
+            raise RuntimeError("관리 작업 폴더에 예상하지 못한 파일이 있습니다: "+str(root))
+        url=_invoke(job,[git,"remote","get-url","origin"],root,25,env).strip()
         actual=url.rstrip("/").removesuffix(".git").lower()
         if actual!=expected.removesuffix(".git").lower():
-            if project=="laminel" and actual=="https://github.com/ccqpqp/laminel":
-                _invoke(job,[git,"remote","set-url","origin",expected],root,25,env)
-            else:
-                raise RuntimeError("기존 작업 폴더의 GitHub 저장소가 다릅니다: "+str(root))
+            raise RuntimeError("관리 작업 폴더의 GitHub 원격 정보가 맞지 않습니다. 폴더는 변경하지 않습니다: "+str(root))
     else:
-        _invoke(job,[git,"clone","--depth","1","--branch","main",expected,str(root)],WORKSPACES,600,env)
-    _invoke(job,[git,"fetch","--depth","1","origin","main"],root,300,env)
-    sha=_invoke(job,[git,"rev-parse","FETCH_HEAD"],root,30).strip()
+        _invoke(job,[git,"clone","--depth","1","--branch",branch,expected,str(root)],WORKSPACES,600,env)
+    _invoke(job,[git,"fetch","--depth","1","origin",branch],root,300,env)
+    sha=_invoke(job,[git,"rev-parse","FETCH_HEAD"],root,30,env).strip()
     if not SHA.fullmatch(sha):
         raise RuntimeError("GitHub 커밋 확인 실패")
-    expected=job.get("expectedSha","")
-    if expected and sha.lower()!=expected:
-        raise RuntimeError("배포 전 확인 뒤 GitHub 최신 커밋이 변경됐습니다. 변경 내용을 다시 확인한 뒤 시도하세요.")
+    if job.get("expectedSha") and sha.lower()!=job["expectedSha"]:
+        raise RuntimeError("확인 뒤 GitHub 최신 커밋이 변경됐습니다. 다시 확인하세요.")
     _invoke(job,[git,"reset","--hard",sha],root,60,env)
-    # The private managed workspace is never a user's development folder.
-    with LOCK:
-        job["sha"]=sha.lower()
+    with LOCK:job["sha"]=sha.lower()
     return root,env
 
 def _has_deps(root):
@@ -395,11 +468,12 @@ def _has_deps(root):
 
 def _run(job):
     project=job["project"]
-    repo,script,output=SITES[project]
-    root,env=_prepare(job,repo)
-    if not (root/"package.json").is_file():
-        raise RuntimeError("저장소에 package.json이 없습니다.")
-    pkg=json.loads((root/"package.json").read_text(encoding="utf-8"))
+    source=job["source"]
+    repo,script,output,branch=(source[key] for key in ("repo","script","output","branch"))
+    root,env=_prepare(job,repo,branch)
+    if script and not (root/"package.json").is_file():
+        raise RuntimeError("빌드할 저장소에 package.json이 없습니다.")
+    pkg=json.loads((root/"package.json").read_text(encoding="utf-8")) if (root/"package.json").is_file() else {}
     if script and not isinstance(pkg.get("scripts",{}).get(script),str):
         raise RuntimeError("GitHub에 공통 빌드 명령이 없습니다: npm run "+script)
     if script:
@@ -426,7 +500,7 @@ def _run(job):
     _phase(job,"upload","Cloudflare Pages 전송 중")
     # Only known directories/projects and an exact freshly fetched HEAD.
     _invoke(job,[wrangler,"--yes","wrangler@4.148.0","pages","deploy",output,
-        "--project-name",project,"--branch","main",
+        "--project-name",project,"--branch",branch,
         "--commit-hash",job["sha"],"--commit-dirty=false"],root,1200,env)
     _phase(job,"success","Cloudflare 업로드 명령이 성공했습니다. 운영 반영은 Pages에서 확인하세요.")
 
@@ -495,24 +569,8 @@ def _worker_loop():
                 pass
 
 def plan(project):
-    if not isinstance(project,str) or project not in SITES or not PROJECT.fullmatch(project):
-        raise ValueError("지원하지 않는 배포 대상입니다.")
-    repo=SITES[project][0]
-    git=_executable("git")
-    expected=f"https://github.com/ccqpqp/{repo}.git"
-    env=os.environ.copy()
-    env.update({"GIT_TERMINAL_PROMPT":"0","GCM_INTERACTIVE":"Never"})
-    flags=getattr(subprocess,"CREATE_NO_WINDOW",0)
-    try:
-        result=subprocess.run([git,"ls-remote","--exit-code",expected,"refs/heads/main"],
-            stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,encoding="utf-8",errors="replace",
-            stdin=subprocess.DEVNULL,shell=False,timeout=35,creationflags=flags,env=env)
-    except subprocess.TimeoutExpired as exc:
-        raise ValueError("GitHub 최신 커밋 확인 시간이 초과됐습니다.") from exc
-    sha=(result.stdout.split() or [""])[0].lower()
-    if result.returncode or not SHA.fullmatch(sha):
-        raise ValueError("GitHub 최신 커밋을 확인할 수 없습니다.")
-    return {"project":project,"repo":"ccqpqp/"+repo,"branch":"main","sha":sha}
+    source=site_source(project)
+    return {"project":project,**source,"sha":_head_for(source["repo"],source["branch"])}
 
 def _start_workers_locked():
     target=min(MAX_CONCURRENT,len(QUEUE)+len(ACTIVE))
@@ -537,8 +595,7 @@ def set_max_concurrent(value):
 
 
 def submit(project, expected_sha="", automatic=False):
-    if not isinstance(project,str) or project not in SITES or not PROJECT.fullmatch(project):
-        raise ValueError("지원하지 않는 배포 대상입니다.")
+    source=site_source(project)
     expected_sha=str(expected_sha or "").lower()
     if expected_sha and not SHA.fullmatch(expected_sha):
         raise ValueError("자동배포 커밋 형식이 올바르지 않습니다.")
@@ -555,7 +612,7 @@ def submit(project, expected_sha="", automatic=False):
         if len(QUEUE)>=MAX_QUEUE:
             raise ValueError("로컬 배포 대기열이 가득 찼습니다.")
         identity=uuid.uuid4().hex
-        job={"id":identity,"project":project,"phase":"queued",
+        job={"id":identity,"project":project,"source":source,"phase":"queued",
              "sha":"","message":"로컬 배포 대기 중","startedAt":_ts(),
              "updatedAt":_ts(),"endedAt":None,"automatic":bool(automatic),
              "expectedSha":expected_sha,"lines":collections.deque(maxlen=90),
@@ -612,7 +669,7 @@ def status():
     with LOCK:
         return {"connected":True,"active":sorted(ACTIVE),"activeCount":len(RUNNING),"waitingForMemory":len(ACTIVE)-len(RUNNING),"queued":len(QUEUE),
                 "jobs":[_public(JOBS[i]) for i in ORDER if i in JOBS][:20],
-                "projects":list(SITES),"maxConcurrent":MAX_CONCURRENT,"automaticReady":True,
+                "projects":list(SITES),"sources":source_summary(),"maxConcurrent":MAX_CONCURRENT,"automaticReady":True,
                  "history":_history()[:20]}
 
 def shutdown():
