@@ -1,8 +1,11 @@
 name: Publish connector
 
-# Publishing this connector installs a new PC version. Git pushes are source-only;
-# releases must be explicitly started after validating the connector.
+# Every validated main revision is the installable PC version. Keeping Pages in
+# lockstep with main prevents the updater from reporting stale packages.
 on:
+  push:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:

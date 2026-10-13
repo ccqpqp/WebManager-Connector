@@ -34,4 +34,7 @@ assert(agent.includes('if not self.authorized():return self.send(401'),'PC probe
 assert(agent.includes("REMOTE_USER_AGENT='WebManagerConnector/0.7.0'"),'Connector must identify itself instead of using Python urllib browser signature');
 assert(agent.includes("request_headers.setdefault('User-Agent',REMOTE_USER_AGENT)"),'Remote requests must send the connector identity');
 assert(agent.includes("'rayId':header('CF-Ray',96)")&&agent.includes("raw[:2048]")&&agent.includes("[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])"),'Safe bounded Cloudflare diagnostics are required');
+const workflow=await readFile('.github/workflows/publish.yml','utf8');
+assert.match(workflow,/push:\s*\n\s*branches:\s*\n\s*- main/,'Connector releases must publish automatically from main');
+assert.match(workflow,/workflow_dispatch:/,'Manual recovery publishing must remain available');
 console.log('Connector release verified:',manifest.version.slice(0,12));
