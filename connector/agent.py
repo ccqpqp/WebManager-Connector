@@ -61,7 +61,7 @@ def create_remote_link():
         '/v1/notifications','/v1/notifications/display',
     }
     WRITE={
-        '/v1/preview/start','/v1/deploy/start','/v1/deploy/concurrency',
+        '/v1/preview/start','/v1/deploy/start','/v1/deploy/source','/v1/deploy/concurrency',
         '/v1/notifications','/v1/notifications/test','/v1/workspace/save',
         '/v1/workspace/configure','/v1/folders/add','/v1/folders/remove',
         '/v1/trash','/v1/restore','/v1/update/apply','/v1/connector/restart',
