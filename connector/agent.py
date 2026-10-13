@@ -208,7 +208,7 @@ def create_remote_link():
                     STOP.wait(2);continue
                 with LOCK:capacity=max(0,4-len(ACTIVE))
                 if not capacity:STOP.wait(.2);continue
-                LAST_ATTEMPT=time.time()
+                LAST_ATTEMPT=time.time();LAST_HTTP_STATUS=0
                 code,_,raw=_request(current['url']+'/_wm/poll?device='+current['id'],data={'capacity':capacity},
                     headers={'Authorization':'Bearer '+current['token']},timeout=28)
                 LAST_HTTP_STATUS=code
