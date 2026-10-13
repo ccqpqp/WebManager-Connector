@@ -617,6 +617,14 @@ class Handler(BaseHTTPRequestHandler):
                         raise ValueError("배포 알림 입력 형식이 올바르지 않습니다.")
                     return self.send(200,deploy_notices.record(
                         body["project"],body["event"],body["sha"],body["id"],"cloudflare"))
+                if method=="POST" and u.path=="/v1/deploy/source":
+                    length=int(self.headers.get("Content-Length","0") or "0")
+                    if not 0<length<=4096:return self.send(413,{"error":"설정 요청 크기 초과"})
+                    body=json.loads(self.rfile.read(length))
+                    if not isinstance(body,dict) or set(body)!={"project","repo","branch","script","output"}:
+                        raise ValueError("배포 저장소 변경 정보가 올바르지 않습니다.")
+                    return self.send(200,local_deploy.configure_source(
+                        body["project"],body["repo"],body["branch"],body["script"],body["output"]))
                 if method=="POST" and u.path=="/v1/deploy/concurrency":
                     length=int(self.headers.get("Content-Length","0"))
                     if length<=0 or length>MAX_BODY:return self.send(413,{"error":"요청 크기 초과"})
