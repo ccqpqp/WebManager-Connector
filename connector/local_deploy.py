@@ -30,7 +30,7 @@ PROJECT = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 # Values mirror the committed GitHub build contracts, not browser input.
 SITES = {
     "webmanager": ("WebManager", "preflight", "dist"),
-    "laminel": ("laminel", "build", "dist"),
+    "laminel": ("gamestn", "build", "dist"),
     "zeus-helper": ("zeus-helper", "build", "public"),
     "site-ops": ("site-ops", "build", "public"),
     "aniimo-guide-gstn": ("aniimo-guide", "build", ".build/public"),
