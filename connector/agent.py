@@ -120,6 +120,7 @@ def create_remote_link():
             return {'id':current['id'],'name':current['name'],'registered':enabled,
                     'connected':enabled and time.time()-LAST_CONTACT<45,
                     'disabledByUser':current.get('disabledReason')=='user',
+                    'disabledReason':str(current.get('disabledReason') or ''),
                     'lastContact':int(LAST_CONTACT*1000) if LAST_CONTACT else None,
                     'error':LAST_ERROR,'version':1}
 
