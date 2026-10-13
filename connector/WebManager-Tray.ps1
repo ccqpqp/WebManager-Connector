@@ -85,7 +85,14 @@ $script:recover = $true
 $script:notifications = $true
 $script:displayFile = Join-Path $script:dataDir 'notification-display.json'
 $script:trayStatusFile = Join-Path $script:dataDir 'tray-status.json'
-$script:traySourceHash = try {(Get-FileHash -LiteralPath (Join-Path $script:root 'WebManager-Tray.ps1') -Algorithm SHA256).Hash.ToLowerInvariant()}catch{''}
+$script:traySourceHash = try {
+    $sha256=[System.Security.Cryptography.SHA256]::Create()
+    try {
+        ([System.BitConverter]::ToString($sha256.ComputeHash(
+            [System.IO.File]::ReadAllBytes((Join-Path $script:root 'WebManager-Tray.ps1'))
+        ))).Replace('-','').ToLowerInvariant()
+    } finally {$sha256.Dispose()}
+} catch {''}
 $script:popup = $null
 $script:popupTimer = $null
 $script:noticeSeenFile = Join-Path $script:dataDir 'notification-seen.json'
