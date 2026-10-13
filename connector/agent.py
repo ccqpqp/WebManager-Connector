@@ -48,6 +48,8 @@ def create_remote_link():
     STATE={}
     LAST_CONTACT=0.0
     LAST_ERROR=''
+    LAST_ATTEMPT=0.0
+    LAST_HTTP_STATUS=0
     PORT=18765
     LOCAL_TOKEN=''
     THREAD=None
@@ -99,18 +101,21 @@ def create_remote_link():
             return dict(STATE)
 
     def configure(data):
-        nonlocal LAST_ERROR
+        nonlocal LAST_ERROR,LAST_CONTACT,LAST_ATTEMPT,LAST_HTTP_STATUS
         if not isinstance(data,dict) or set(data)!={'url','id'} or not valid_origin(data.get('url')):
             raise ValueError('공식 PC 연결 서버 주소만 사용할 수 있습니다')
         with LOCK:
             current=identity()
             if data['id']!=current['id']:raise ValueError('PC 등록 번호가 다릅니다')
-            STATE['url']=data['url'];STATE['disabled']=False;STATE['disabledReason']='';_write();LAST_ERROR=''
+            STATE['url']=data['url'];STATE['disabled']=False;STATE['disabledReason']='';_write()
+            LAST_ERROR='';LAST_CONTACT=0.0;LAST_ATTEMPT=0.0;LAST_HTTP_STATUS=0
         return status()
 
     def disable():
+        nonlocal LAST_CONTACT,LAST_HTTP_STATUS
         with LOCK:
             identity();STATE['disabled']=True;STATE['disabledReason']='user';_write()
+            LAST_CONTACT=0.0;LAST_HTTP_STATUS=0
         return status()
 
     def status():
@@ -122,7 +127,9 @@ def create_remote_link():
                     'disabledByUser':current.get('disabledReason')=='user',
                     'disabledReason':str(current.get('disabledReason') or ''),
                     'lastContact':int(LAST_CONTACT*1000) if LAST_CONTACT else None,
-                    'error':LAST_ERROR,'version':1}
+                    'lastAttempt':int(LAST_ATTEMPT*1000) if LAST_ATTEMPT else None,
+                    'lastHttpStatus':LAST_HTTP_STATUS or None,
+                    'error':LAST_ERROR,'version':2}
 
     def _request(url,method='POST',data=None,headers=None,timeout=25,local=False):
         payload=None if data is None else json.dumps(data,ensure_ascii=False,separators=(',',':')).encode('utf-8')
@@ -192,7 +199,7 @@ def create_remote_link():
             with LOCK:ACTIVE.discard(task.get('id'))
 
     def _run():
-        nonlocal LAST_CONTACT,LAST_ERROR
+        nonlocal LAST_CONTACT,LAST_ERROR,LAST_ATTEMPT,LAST_HTTP_STATUS
         failures=0
         while not STOP.is_set():
             try:
@@ -201,12 +208,14 @@ def create_remote_link():
                     STOP.wait(2);continue
                 with LOCK:capacity=max(0,4-len(ACTIVE))
                 if not capacity:STOP.wait(.2);continue
+                LAST_ATTEMPT=time.time()
                 code,_,raw=_request(current['url']+'/_wm/poll?device='+current['id'],data={'capacity':capacity},
                     headers={'Authorization':'Bearer '+current['token']},timeout=28)
+                LAST_HTTP_STATUS=code
                 if code==401:
-                    with LOCK:LAST_ERROR='PC에서 WebManager에 다시 접속해 연결하세요';STATE['disabled']=True;STATE['disabledReason']='auth';_write()
+                    with LOCK:LAST_ERROR='PC 원격 서버 인증 거절 HTTP 401 · PC에서 [원격 연결 복구]를 실행하세요';STATE['disabled']=True;STATE['disabledReason']='auth';_write()
                     continue
-                if code!=200:raise ValueError('PC 연결 서버 응답 오류 '+str(code))
+                if code!=200:raise ValueError('PC 연결 서버 응답 오류 HTTP '+str(code))
                 data=json.loads(raw.decode('utf-8'))
                 if not isinstance(data.get('tasks'),list):raise ValueError('PC 연결 응답 형식 오류')
                 LAST_CONTACT=time.time();LAST_ERROR='';failures=0
