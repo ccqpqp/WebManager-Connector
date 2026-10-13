@@ -50,6 +50,7 @@ def create_remote_link():
     LAST_ERROR=''
     LAST_ATTEMPT=0.0
     LAST_HTTP_STATUS=0
+    LAST_RESPONSE={}
     PORT=18765
     LOCAL_TOKEN=''
     THREAD=None
@@ -72,6 +73,42 @@ def create_remote_link():
     class NoRedirect(HTTPRedirectHandler):
         def redirect_request(self,req,fp,code,msg,headers,newurl):
             return None
+
+    REMOTE_USER_AGENT='WebManagerConnector/0.7.0'
+
+    def response_diagnostic(headers,raw,status):
+        """Return only bounded, non-secret edge evidence suitable for the UI."""
+        def header(name,limit):
+            value=str(headers.get(name,'')).strip()
+            return value[:limit] if all(ord(char)>=32 for char in value) else ''
+        result={
+            'httpStatus':status,
+            'rayId':header('CF-Ray',96),
+            'server':header('Server',40),
+            'contentType':header('Content-Type',96),
+        }
+        if status!=200:
+            text=raw[:2048].decode('utf-8','replace')
+            cloudflare=re.search(r'(?i)\berror\s+code:\s*(\d{4})\b',text)
+            if cloudflare:
+                result['cloudflareError']=cloudflare.group(1)
+                result['body']='error code: '+cloudflare.group(1)
+            else:
+                # Never expose a device id, bearer-shaped value, or multiline
+                # proxy/error page through the browser diagnostics.
+                text=re.sub(r'(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])','[비밀값 제거]',text)
+                text=re.sub(r'(?<![a-f0-9])[a-f0-9]{32}(?![a-f0-9])','[기기 번호 제거]',text)
+                text=re.sub(r'(?i)authorization\s*:\s*\S+','Authorization: [비밀값 제거]',text)
+                text=' '.join(text.split())
+                if text:result['body']=text[:240]
+        return {key:value for key,value in result.items() if value not in ('',None)}
+
+    def diagnostic_suffix(diagnostic):
+        details=[]
+        if diagnostic.get('cloudflareError'):details.append('Cloudflare '+diagnostic['cloudflareError'])
+        if diagnostic.get('rayId'):details.append('Ray ID '+diagnostic['rayId'])
+        if diagnostic.get('body') and not diagnostic.get('cloudflareError'):details.append('응답 '+diagnostic['body'])
+        return ' · '+' · '.join(details) if details else ''
 
     def valid_origin(value):
         if not isinstance(value,str):return False
@@ -101,21 +138,21 @@ def create_remote_link():
             return dict(STATE)
 
     def configure(data):
-        nonlocal LAST_ERROR,LAST_CONTACT,LAST_ATTEMPT,LAST_HTTP_STATUS
+        nonlocal LAST_ERROR,LAST_CONTACT,LAST_ATTEMPT,LAST_HTTP_STATUS,LAST_RESPONSE
         if not isinstance(data,dict) or set(data)!={'url','id'} or not valid_origin(data.get('url')):
             raise ValueError('공식 PC 연결 서버 주소만 사용할 수 있습니다')
         with LOCK:
             current=identity()
             if data['id']!=current['id']:raise ValueError('PC 등록 번호가 다릅니다')
             STATE['url']=data['url'];STATE['disabled']=False;STATE['disabledReason']='';_write()
-            LAST_ERROR='';LAST_CONTACT=0.0;LAST_ATTEMPT=0.0;LAST_HTTP_STATUS=0
+            LAST_ERROR='';LAST_CONTACT=0.0;LAST_ATTEMPT=0.0;LAST_HTTP_STATUS=0;LAST_RESPONSE={}
         return status()
 
     def disable():
-        nonlocal LAST_CONTACT,LAST_HTTP_STATUS
+        nonlocal LAST_CONTACT,LAST_HTTP_STATUS,LAST_RESPONSE
         with LOCK:
             identity();STATE['disabled']=True;STATE['disabledReason']='user';_write()
-            LAST_CONTACT=0.0;LAST_HTTP_STATUS=0
+            LAST_CONTACT=0.0;LAST_HTTP_STATUS=0;LAST_RESPONSE={}
         return status()
 
     def status():
@@ -141,8 +178,9 @@ def create_remote_link():
                     'lastContact':int(LAST_CONTACT*1000) if LAST_CONTACT else None,
                     'lastAttempt':int(LAST_ATTEMPT*1000) if LAST_ATTEMPT else None,
                     'lastHttpStatus':LAST_HTTP_STATUS or None,
+                    'lastResponse':dict(LAST_RESPONSE),
                     'threadAlive':thread_alive,'phase':phase,
-                    'error':LAST_ERROR,'version':3}
+                    'error':LAST_ERROR,'version':4}
 
     def probe():
         # Local administrator-only, read-only network check. Do not mark the PC
@@ -156,6 +194,7 @@ def create_remote_link():
         started=time.monotonic()
         try:
             code,headers,raw=_request(url+'/_wm/version',method='GET',timeout=12)
+            diagnostic=response_diagnostic(headers,raw,code)
             try:data=json.loads(raw.decode('utf-8'))
             except (UnicodeDecodeError,ValueError):data={}
             if not isinstance(data,dict):data={}
@@ -163,8 +202,9 @@ def create_remote_link():
             return {'ok':good,'phase':'worker-reachable' if good else 'worker-http',
                     'httpStatus':code,'latencyMs':round((time.monotonic()-started)*1000),
                     'relayVersion':str(data.get('version',''))[:40],
+                    'response':diagnostic,
                     'message':'PC에서 원격 Worker HTTPS 접속 성공 · 실제 작업 연결은 별도 확인 필요' if good
-                    else 'PC에서 원격 Worker가 정상 응답하지 않았습니다. HTTP '+str(code),
+                    else 'PC에서 원격 Worker가 정상 응답하지 않았습니다. HTTP '+str(code)+diagnostic_suffix(diagnostic),
                     'local':status()}
         except (OSError,ValueError,KeyError,TypeError) as exc:
             return {'ok':False,'phase':'network-failed',
@@ -174,7 +214,9 @@ def create_remote_link():
 
     def _request(url,method='POST',data=None,headers=None,timeout=25,local=False):
         payload=None if data is None else json.dumps(data,ensure_ascii=False,separators=(',',':')).encode('utf-8')
-        request=Request(url,data=payload,method=method,headers={'Content-Type':'application/json',**(headers or {})})
+        request_headers={'Content-Type':'application/json',**(headers or {})}
+        if not local:request_headers.setdefault('User-Agent',REMOTE_USER_AGENT)
+        request=Request(url,data=payload,method=method,headers=request_headers)
         opener=build_opener(ProxyHandler({}),NoRedirect()) if local else build_opener(NoRedirect())
         try:response=opener.open(request,timeout=timeout)
         except HTTPError as error:response=error
@@ -240,7 +282,7 @@ def create_remote_link():
             with LOCK:ACTIVE.discard(task.get('id'))
 
     def _run():
-        nonlocal LAST_CONTACT,LAST_ERROR,LAST_ATTEMPT,LAST_HTTP_STATUS
+        nonlocal LAST_CONTACT,LAST_ERROR,LAST_ATTEMPT,LAST_HTTP_STATUS,LAST_RESPONSE
         failures=0
         while not STOP.is_set():
             try:
@@ -249,14 +291,17 @@ def create_remote_link():
                     STOP.wait(2);continue
                 with LOCK:capacity=max(0,4-len(ACTIVE))
                 if not capacity:STOP.wait(.2);continue
-                LAST_ATTEMPT=time.time();LAST_HTTP_STATUS=0
-                code,_,raw=_request(current['url']+'/_wm/poll?device='+current['id'],data={'capacity':capacity},
+                # Keep the last completed HTTP result visible while the next
+                # long-poll is in flight; starting a request is not a result.
+                LAST_ATTEMPT=time.time()
+                code,headers,raw=_request(current['url']+'/_wm/poll?device='+current['id'],data={'capacity':capacity},
                     headers={'Authorization':'Bearer '+current['token']},timeout=28)
                 LAST_HTTP_STATUS=code
+                LAST_RESPONSE=response_diagnostic(headers,raw,code)
                 if code==401:
-                    with LOCK:LAST_ERROR='PC 원격 서버 인증 거절 HTTP 401 · PC에서 [원격 연결 복구]를 실행하세요';STATE['disabled']=True;STATE['disabledReason']='auth';_write()
+                    with LOCK:LAST_ERROR='PC 원격 서버 인증 거절 HTTP 401'+diagnostic_suffix(LAST_RESPONSE)+' · PC에서 [원격 연결 복구]를 실행하세요';STATE['disabled']=True;STATE['disabledReason']='auth';_write()
                     continue
-                if code!=200:raise ValueError('PC 연결 서버 응답 오류 HTTP '+str(code))
+                if code!=200:raise ValueError('PC 연결 서버 응답 오류 HTTP '+str(code)+diagnostic_suffix(LAST_RESPONSE))
                 data=json.loads(raw.decode('utf-8'))
                 if not isinstance(data.get('tasks'),list):raise ValueError('PC 연결 응답 형식 오류')
                 LAST_CONTACT=time.time();LAST_ERROR='';failures=0

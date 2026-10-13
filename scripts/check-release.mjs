@@ -31,4 +31,7 @@ for(const feature of [
   "'lastHttpStatus':LAST_HTTP_STATUS or None"
 ])assert(agent.includes(feature),'Missing required PC outbound connection feature: '+feature);
 assert(agent.includes('if not self.authorized():return self.send(401'),'PC probe requires local authentication');
+assert(agent.includes("REMOTE_USER_AGENT='WebManagerConnector/0.7.0'"),'Connector must identify itself instead of using Python urllib browser signature');
+assert(agent.includes("request_headers.setdefault('User-Agent',REMOTE_USER_AGENT)"),'Remote requests must send the connector identity');
+assert(agent.includes("'rayId':header('CF-Ray',96)")&&agent.includes("raw[:2048]")&&agent.includes("[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])"),'Safe bounded Cloudflare diagnostics are required');
 console.log('Connector release verified:',manifest.version.slice(0,12));
