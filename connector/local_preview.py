@@ -5,6 +5,7 @@ write to a user's checkout. A successful build is served with noindex headers.
 """
 from __future__ import annotations
 import datetime
+import hashlib
 import html
 import json
 import mimetypes
@@ -83,16 +84,18 @@ def _run(job,args,cwd,timeout):
     if result.returncode:raise RuntimeError("미리보기 빌드 실패 · "+_failure_summary(output))
     return result.stdout.strip()
 
-def _safe_workspace(project):
-    root=(WORKSPACES/project).resolve()
+def _safe_workspace(project,repo,branch):
+    identity=hashlib.sha256((repo+"@"+branch).encode("utf-8")).hexdigest()[:12]
+    root=(WORKSPACES/(project+"-"+identity)).resolve()
     if not root.is_relative_to(WORKSPACES.resolve()):raise RuntimeError("미리보기 작업 폴더 오류")
     return root
 
 def _build(job):
     project=job["project"]
-    repo,script,output=local_deploy.SITES[project]
-    root=_safe_workspace(project)
-    expected="https://github.com/ccqpqp/"+repo+".git"
+    source=job["source"]
+    repo,script,output,branch=(source[k] for k in ("repo","script","output","branch"))
+    root=_safe_workspace(project,repo,branch)
+    expected="https://github.com/"+repo+".git"
     git=_executable("git")
     WORKSPACES.mkdir(parents=True,exist_ok=True)
     _phase(job,"source","GitHub 미리보기 코드를 확인하는 중")
@@ -101,13 +104,10 @@ def _build(job):
         origin=_run(job,[git,"remote","get-url","origin"],root,20)
         actual=origin.rstrip("/").removesuffix(".git").lower()
         if actual!=expected.removesuffix(".git").lower():
-            if project=="laminel" and actual=="https://github.com/ccqpqp/laminel":
-                _run(job,[git,"remote","set-url","origin",expected],root,20)
-            else:
-                raise RuntimeError("미리보기 저장소 연결이 다릅니다")
+            raise RuntimeError("미리보기 관리 폴더의 GitHub 연결이 예상과 다릅니다. 기존 폴더는 유지됩니다.")
     else:
-        _run(job,[git,"clone","--depth","1","--branch","main",expected,str(root)],WORKSPACES,600)
-    _run(job,[git,"fetch","--depth","1","origin","main"],root,300)
+        _run(job,[git,"clone","--depth","1","--branch",branch,expected,str(root)],WORKSPACES,600)
+    _run(job,[git,"fetch","--depth","1","origin",branch],root,300)
     sha=_run(job,[git,"rev-parse","FETCH_HEAD"],root,30).lower()
     if not SHA.fullmatch(sha) or sha!=job["sha"]:raise RuntimeError("확인 뒤 GitHub 최신 커밋이 변경됐습니다. 다시 미리보기를 실행하세요.")
     published=(root/Path(output)).resolve()
@@ -192,7 +192,7 @@ def start(project,sha,port):
                 if job["phase"]=="ready" and job.get("token") in SESSIONS:SESSIONS[job["token"]]["expires"]=time.time()+TTL_SECONDS
                 return dict(job)
         identity=uuid.uuid4().hex
-        job={"id":identity,"project":project,"sha":sha,"phase":"queued","message":"미리보기 대기 중",
+        job={"id":identity,"project":project,"source":local_deploy.site_source(project),"sha":sha,"phase":"queued","message":"미리보기 대기 중",
              "createdAt":_now(),"updatedAt":_now(),"url":"","log":[]}
         JOBS[identity]=job
     threading.Thread(target=_worker,args=(job,port),name="WebManagerPreview",daemon=True).start()
