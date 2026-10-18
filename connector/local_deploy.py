@@ -39,6 +39,7 @@ SITES = {
     "scholarship": ("scholarship", "build", "dist"),
     "foreign-worker-check": ("foreign-worker-check", "build", "dist"),
     "freelancer-tax-check": ("freelancer-tax-check", "", "public"),
+    "income-compare": ("income-compare", "build", "dist"),
 }
 MAX_QUEUE = 6
 

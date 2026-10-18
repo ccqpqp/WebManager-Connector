@@ -39,6 +39,7 @@ LIVE_URLS={
     "laminel":"https://gamestn.com",
     "zeus-helper":"https://zeusguide.kr",
     "site-ops":"https://site-ops-8kf.pages.dev",
+    "income-compare":"https://income-compare.pages.dev",
 }
 SHELL_JS=Path(__file__).with_name("preview_shell.js")
 SHELL_CSS=Path(__file__).with_name("preview_shell.css")
