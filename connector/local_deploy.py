@@ -1,4 +1,4 @@
-"""Allowlisted Cloudflare Pages local manual and opt-in automatic deploy coordinator.
+"""Allowlisted Cloudflare Pages/Workers local manual and opt-in automatic deploy coordinator.
 
 The browser submits a project ID only. There is no shell, custom command,
 or custom checkout path. Automatic jobs also pin the GitHub HEAD observed by the
@@ -40,7 +40,9 @@ SITES = {
     "foreign-worker-check": ("foreign-worker-check", "build", "dist"),
     "freelancer-tax-check": ("freelancer-tax-check", "", "public"),
     "donjob": ("donjob", "build", "dist"),
+    "daumjang": ("daumjang", "", "public"),
 }
+WORKER_SITES = {"daumjang"}
 MAX_QUEUE = 6
 
 SOURCE_FILE = DATA / "deploy-sources.json"
@@ -76,10 +78,11 @@ def _source_overrides():
 
 def site_source(project):
     if not isinstance(project,str) or project not in SITES or not PROJECT.fullmatch(project):
-        raise ValueError("지원하지 않는 Pages 배포 대상입니다.")
+        raise ValueError("지원하지 않는 Cloudflare 배포 대상입니다.")
     old,script,output=SITES[project]
     with SOURCE_LOCK:override=_source_overrides().get(project)
-    return dict(override or _validate_source("ccqpqp/"+old,"main",script,output))
+    return {**dict(override or _validate_source("ccqpqp/"+old,"main",script,output)),
+            "kind":"worker" if project in WORKER_SITES else "pages"}
 
 def source_summary():
     configured=_source_overrides()
@@ -104,7 +107,7 @@ def _head_for(repository,branch):
 
 def configure_source(project,repo,branch,script,output):
     if not isinstance(project,str) or project not in SITES or not PROJECT.fullmatch(project):
-        raise ValueError("지원하는 Pages 사이트를 선택하세요.")
+        raise ValueError("지원하는 Cloudflare 사이트를 선택하세요.")
     value=_validate_source(repo,branch,script,output)
     if project=="webmanager" and (value["script"]!="preflight" or value["output"]!="dist"):
         raise ValueError("WebManager 자체 배포는 npm run preflight와 dist 출력 검증이 필수입니다.")
@@ -494,12 +497,21 @@ def _run(job):
                 stamp.write_text(fingerprint,encoding="utf-8")
         _phase(job,"build","필수 빌드·검증 실행")
         _invoke(job,[npm,"run",script],root,1800,env)
+    wrangler=_executable("npx.cmd" if os.name=="nt" else "npx")
+    if source.get("kind")=="worker":
+        if not (root/"wrangler.jsonc").is_file() and not (root/"wrangler.toml").is_file():
+            raise RuntimeError("Worker 배포 설정(wrangler.jsonc 또는 wrangler.toml)이 없습니다.")
+        _phase(job,"upload","Cloudflare Worker 전송 중")
+        # The browser never supplies a command or Worker name. Both are pinned
+        # by this allowlist and the freshly fetched repository configuration.
+        _invoke(job,[wrangler,"--yes","wrangler@4.148.0","deploy","--name",project],root,1200,env)
+        _phase(job,"success","Cloudflare Worker 배포가 완료됐습니다.")
+        return
     published=(root/Path(output)).resolve()
     if published==root or not published.is_relative_to(root) or not published.is_dir():
         raise RuntimeError("배포 출력 폴더가 올바르지 않습니다: "+output)
     if not (published/"index.html").is_file():
         raise RuntimeError("배포 출력 폴더에 index.html이 없습니다.")
-    wrangler=_executable("npx.cmd" if os.name=="nt" else "npx")
     _phase(job,"upload","Cloudflare Pages 전송 중")
     # Only known directories/projects and an exact freshly fetched HEAD.
     _invoke(job,[wrangler,"--yes","wrangler@4.148.0","pages","deploy",output,

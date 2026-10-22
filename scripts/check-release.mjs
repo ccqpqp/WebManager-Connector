@@ -13,6 +13,8 @@ assert.match(updater,/https:\/\/ccqpqp\.github\.io\/WebManager-Connector/);
 const preview=await readFile('connector/local_preview.py','utf8');
 const deploy=await readFile('connector/local_deploy.py','utf8');
 assert.match(deploy,/"donjob": \("donjob", "build", "dist"\)/);
+assert.match(deploy,/"daumjang": \("daumjang", "", "public"\)/);
+assert.match(deploy,/"wrangler@4\.148\.0","deploy","--name",project/);
 assert.match(preview,/"donjob":"https:\/\/donjob\.pages\.dev"/);
 assert.match(preview,/def _failure_summary\(output\)/);
 assert.match(preview,/미리보기 빌드 실패/);
