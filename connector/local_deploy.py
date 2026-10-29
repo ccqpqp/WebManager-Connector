@@ -29,6 +29,7 @@ PROJECT = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 # Project -> (GitHub repository, npm command, Pages publish folder)
 # Values mirror the committed GitHub build contracts, not browser input.
 SITES = {
+    "2d-test-lab": ("today-die/2d-test-lab", "build", "dist"),
     "webmanager": ("WebManager", "preflight", "dist"),
     "laminel": ("gamestn", "build", "dist"),
     "zeus-helper": ("zeus-helper", "build", "public"),
@@ -81,7 +82,7 @@ def site_source(project):
         raise ValueError("지원하지 않는 Cloudflare 배포 대상입니다.")
     old,script,output=SITES[project]
     with SOURCE_LOCK:override=_source_overrides().get(project)
-    return {**dict(override or _validate_source("ccqpqp/"+old,"main",script,output)),
+    return {**dict(override or _validate_source(old if "/" in old else "ccqpqp/"+old,"main",script,output)),
             "kind":"worker" if project in WORKER_SITES else "pages"}
 
 def source_summary():
