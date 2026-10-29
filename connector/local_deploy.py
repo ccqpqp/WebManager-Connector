@@ -29,7 +29,7 @@ PROJECT = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 # Project -> (GitHub repository, npm command, Pages publish folder)
 # Values mirror the committed GitHub build contracts, not browser input.
 SITES = {
-    "2d-test-lab": ("today-die/2d-test-lab", "build", "dist"),
+    "2d-test-lab": ("ccqpqp-project/2d-test-lab", "build", "dist"),
     "webmanager": ("WebManager", "preflight", "dist"),
     "laminel": ("gamestn", "build", "dist"),
     "zeus-helper": ("zeus-helper", "build", "public"),
